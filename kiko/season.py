@@ -20,7 +20,8 @@ class SeasonDataset(object):
         storms = [Storm.from_bdeck(i) for i in file_list]
         return cls(storms)
 
-    def daily_ace(self, year: int):
+    def daily_ace(self, year: int, push_leap_day: bool = False):
+        # TODO: Select basin
         # Check year itself, year before and after
         for _yr in [year - 1, year, year + 1]:
             if _yr in self.season_dict:
@@ -38,10 +39,13 @@ class SeasonDataset(object):
                     day_of_year = int(mjd - datetime_to_mjd(datetime.datetime(year, 1, 1)))
                     if 0 <= day_of_year < data_size:
                         ace[day_of_year] += basin_ace.total
+        if push_leap_day and isleap(year):
+            ace[59] += ace[60]  # Add 2/29 data to 3/1
+            ace = np.delete(ace, 60)  # Remove 2/29
         return ace
 
-    def cumulative_ace(self, year: int):
-        return np.cumsum(self.daily_ace(year))
+    def cumulative_ace(self, year: int, push_leap_day: bool = False):
+        return np.cumsum(self.daily_ace(year, push_leap_day=push_leap_day))
 
     def overlapping_storm(self, year: int, tropical=True, basin=None):
         storm_list = self.season_dict[year]

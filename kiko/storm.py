@@ -5,12 +5,20 @@ from functools import cached_property
 
 import pytz
 import numpy as np
+from shapely.geometry import LineString, Polygon, Point
 
 from kiko.bdeck import BDeckFile
 from kiko.utils import datetime_to_mjd
 
 TROPICAL_TYPE = set(['TD', 'TS', 'TY', 'HU', 'ST'])
 NORTHERN_HEMISPHERE_BASIN = set(['WP', 'EP', 'CP', 'AL', 'IO'])
+
+class Basin(enum.IntEnum):
+    WPAC = 0
+    EPAC = 1
+    NIO = 2
+    SHEM = 3
+    ATL = 4
 
 @dataclass
 class BasinACE:
@@ -20,16 +28,27 @@ class BasinACE:
     shem: float = 0.
     atl: float = 0.
 
-    @cached_property
+    @property
     def total(self):
         return self.wpac + self.epac + self.nio + self.shem + self.atl
+    
+    def set(self, basin: Basin, value):
+        match basin:
+            case Basin.WPAC:
+                self.wpac += value
+            case Basin.EPAC:
+                self.epac += value
+            case Basin.NIO:
+                self.nio += value
+            case Basin.SHEM:
+                self.shem += value
+            case Basin.ATL:
+                self.atl += value
+            case _:
+                raise ValueError('Invalid basin')
 
-class Basin(enum.Enum):
-    WPAC = 0
-    EPAC = 1
-    NIO = 2
-    SHEM = 3
-    ATL = 4
+    def get(self, basin: Basin):
+        return [self.wpac, self.epac, self.nio, self.shem, self.atl][basin]
 
 def ensure_utc(time: datetime.datetime):
     if not time.tzinfo:
@@ -81,7 +100,7 @@ class Storm(object):
             self.pressure = np.array(pressure)
         if storm_type is None:
             self.storm_type = None
-            self._tropical_flag = None
+            self._tropical_flag = np.ones_like(self.longitude, dtype=bool) # Assume all tropical
         else:
             self.storm_type = np.array(storm_type)
             self._tropical_flag = [is_tropical(i) for i in self.storm_type]
@@ -92,13 +111,20 @@ class Storm(object):
         self.mjd = np.array([datetime_to_mjd(i) for i in self.time])
         self._synoptic_flag = [is_synoptic(i) for i in self.time]
 
+        self.flags = {'continuous': True, 'interpolated': False, 'subset': False}
+
     @classmethod
     def from_bdeck(cls, bdeck_path):
         bdeck = BDeckFile(bdeck_path)
         bdeck.open()
         data = bdeck.read_all(formal_advisory=False)
+        stype = np.array(data.get('raw_category'))
+        if stype is not None:
+            stype = stype[stype != '']
+            if stype.size == 0:
+                stype = None
         storm = cls(bdeck.metadata['fullcode'], data['time'], data['lon'],
-                    data['lat'], data['wind'], data.get('pres', None), data.get('raw_category', None),
+                    data['lat'], data['wind'], data.get('pres', None), stype,
                     bdeck.metadata.get('name', None))
         bdeck.close()
         return storm
@@ -158,17 +184,7 @@ class Storm(object):
             mjd = int(_mjd)
             if mjd not in data:
                 data[mjd] = BasinACE()
-            match basin:
-                case Basin.WPAC:
-                    data[mjd].wpac += _ace
-                case Basin.EPAC:
-                    data[mjd].epac += _ace
-                case Basin.NIO:
-                    data[mjd].nio += _ace
-                case Basin.SHEM:
-                    data[mjd].shem += _ace
-                case Basin.ATL:
-                    data[mjd].atl += _ace
+            data[mjd].set(basin, _ace)
         return data
 
     @cached_property
@@ -203,3 +219,32 @@ class Storm(object):
 
     def get_interval(self):
         pass
+
+    @cached_property
+    def _geom(self):
+        return LineString(np.array([self.longitude, self.latitude]))
+
+    def sel_by_bbox(self, bbox: Polygon):
+        cont_flag = True
+        sel_idx = []
+        bbox_buffered = bbox.buffer(0.01)
+        for i, (x, y) in enumerate(zip(self.longitude, self.latitude)):
+            if bbox_buffered.contains(Point(x, y)):
+                if cont_flag and len(sel_idx) != 0:
+                    if (i - sel_idx[-1]) > 1:
+                        cont_flag = False
+                sel_idx.append(i)
+        if not sel_idx:
+            return None
+        sel_time = [self.time[i] for i in sel_idx]
+        sel_lon = self.longitude[sel_idx]
+        sel_lat = self.latitude[sel_idx]
+        sel_wind = self.wind[sel_idx]
+        sel_pressure = self.pressure[sel_idx] if self.pressure is not None else None
+        sel_storm_type = self.storm_type[sel_idx] if self.storm_type is not None else None
+        s = Storm(self.atcf_id, sel_time, sel_lon, sel_lat, sel_wind, sel_pressure,
+                  sel_storm_type, self.metadata.get('name', None))
+        s.flags['continuous'] = cont_flag
+        if len(sel_idx) != len(self.longitude):
+            s.flags['subset'] = True
+        return s

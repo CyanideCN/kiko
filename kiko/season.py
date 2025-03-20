@@ -10,18 +10,19 @@ class SeasonDataset(object):
 
     def __init__(self, storms: list[Storm]):
         self.season_dict: dict[int, list[Storm]] = dict()
+        self.storm_dict: dict[str, Storm] = dict()
         for s in storms:
             if s.atcf_season not in self.season_dict:
                 self.season_dict[s.atcf_season] = list()
             self.season_dict[s.atcf_season].append(s)
+            self.storm_dict[s.full_atcf_id] = s
 
     @classmethod
     def from_bdeck(cls, file_list: list[str]):
         storms = [Storm.from_bdeck(i) for i in file_list]
         return cls(storms)
 
-    def daily_ace(self, year: int, push_leap_day: bool = False):
-        # TODO: Select basin
+    def daily_ace(self, year: int, push_leap_day: bool = False, basin=None):
         # Check year itself, year before and after
         for _yr in [year - 1, year, year + 1]:
             if _yr in self.season_dict:
@@ -38,14 +39,17 @@ class SeasonDataset(object):
                 for mjd, basin_ace in storm.daily_ace.items():
                     day_of_year = int(mjd - datetime_to_mjd(datetime.datetime(year, 1, 1)))
                     if 0 <= day_of_year < data_size:
-                        ace[day_of_year] += basin_ace.total
+                        if basin is None:
+                            ace[day_of_year] += basin_ace.total
+                        else:
+                            ace[day_of_year] += basin_ace.get(basin)
         if push_leap_day and isleap(year):
             ace[59] += ace[60]  # Add 2/29 data to 3/1
             ace = np.delete(ace, 60)  # Remove 2/29
         return ace
 
-    def cumulative_ace(self, year: int, push_leap_day: bool = False):
-        return np.cumsum(self.daily_ace(year, push_leap_day=push_leap_day))
+    def cumulative_ace(self, year: int, push_leap_day: bool = False, basin=None):
+        return np.cumsum(self.daily_ace(year, push_leap_day=push_leap_day, basin=basin))
 
     def overlapping_storm(self, year: int, tropical=True, basin=None):
         storm_list = self.season_dict[year]
@@ -69,3 +73,6 @@ class SeasonDataset(object):
             storm_atcf = [valid_storm_list[i].full_atcf_id for i in storm_idx]
             storm_overlap.append((p[0], p[1], storm_atcf))
         return storm_overlap
+
+    def get_storm(self, atcf_id: str):
+        return self.storm_dict.get(atcf_id)

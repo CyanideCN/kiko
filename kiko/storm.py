@@ -6,9 +6,10 @@ from functools import cached_property
 import pytz
 import numpy as np
 from shapely.geometry import LineString, Polygon, Point
+from scipy.interpolate import interp1d
 
 from kiko.bdeck import BDeckFile
-from kiko.utils import datetime_to_mjd
+from kiko.utils import datetime_to_mjd, movement
 
 TROPICAL_TYPE = set(['TD', 'TS', 'TY', 'HU', 'ST'])
 NORTHERN_HEMISPHERE_BASIN = set(['WP', 'EP', 'CP', 'AL', 'IO'])
@@ -31,7 +32,7 @@ class BasinACE:
     @property
     def total(self):
         return self.wpac + self.epac + self.nio + self.shem + self.atl
-    
+
     def set(self, basin: Basin, value):
         match basin:
             case Basin.WPAC:
@@ -110,6 +111,7 @@ class Storm(object):
             self.metadata['name'] = name
         self.mjd = np.array([datetime_to_mjd(i) for i in self.time])
         self._synoptic_flag = [is_synoptic(i) for i in self.time]
+        self.heading, self.speed = movement(self.longitude, self.latitude, self.mjd)
 
         self.flags = {'continuous': True, 'interpolated': False, 'subset': False}
 
@@ -162,7 +164,7 @@ class Storm(object):
     @property
     def atcf_basin(self):
         return self.atcf_id[:2]
-    
+
     @property
     def atcf_number(self):
         return int(self.atcf_id[2:])
@@ -190,7 +192,7 @@ class Storm(object):
     @cached_property
     def total_ace(self):
         return sum([i.total for i in self.daily_ace.values()])
-    
+
     @cached_property
     def atcf_season(self):
         start_year = self.start_time.year
@@ -202,17 +204,17 @@ class Storm(object):
                 return start_year + 1
             return start_year
         # Start not eq end, year crossover
-        if self.atcf_number < 3:
+        if self.atcf_number % 60 < 3: # For extra ATCF numbering starting from 60
             # Named after year crossover
-            # Assume at most 2 crossover storms per basin
+            # Assume at most 2 year crossover storms per basin
             return end_year
         return start_year
-        
+
     @property
     def full_atcf_id(self):
         '''Long-style ATCF ID (e.g.) WP012025'''
         return f'{self.atcf_id}{self.atcf_season}'
-    
+
     @cached_property
     def tropical_interval(self):
         pass
@@ -247,4 +249,38 @@ class Storm(object):
         s.flags['continuous'] = cont_flag
         if len(sel_idx) != len(self.longitude):
             s.flags['subset'] = True
+        return s
+
+    def interp(self, hour_interval):
+        if not self.flags['continuous']:
+            raise ValueError('Cannot interpolate discontinuous data')
+        if hour_interval <= 0:
+            raise ValueError("hour_interval must be positive")
+
+        new_times = np.arange(self.mjd[0], self.mjd[-1], hour_interval / 24.0)
+
+        interp_lon = interp1d(self.mjd, self.longitude, kind='linear', fill_value="extrapolate")
+        interp_lat = interp1d(self.mjd, self.latitude, kind='linear', fill_value="extrapolate")
+        interp_wind = interp1d(self.mjd, self.wind, kind='linear', fill_value="extrapolate")
+
+        new_longitude = interp_lon(new_times)
+        new_latitude = interp_lat(new_times)
+        new_wind = interp_wind(new_times)
+
+        if self.pressure is not None:
+            interp_pressure = interp1d(self.mjd, self.pressure, kind='linear', fill_value="extrapolate")
+            new_pressure = interp_pressure(new_times)
+        else:
+            new_pressure = None
+
+        if self.storm_type is not None:
+            interp_storm_type = interp1d(self.mjd, self.storm_type, kind='nearest', fill_value="extrapolate")
+            new_storm_type = interp_storm_type(new_times)
+        else:
+            new_storm_type = None
+
+        new_time = [self.time[0] + datetime.timedelta(days=(mjd - self.mjd[0])) for mjd in new_times]
+
+        s = Storm(self.atcf_id, new_time, new_longitude, new_latitude, new_wind, new_pressure, new_storm_type, self.metadata.get('name', None))
+        s.flags['interpolated'] = True
         return s

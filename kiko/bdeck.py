@@ -217,7 +217,7 @@ class BDeckFile:
     def read_data(self, formal_advisory=True, tropical_nature=False):
         """Get next slice of data in the BDeck file by iteration. After
         iterating one step, you can access data in the `idata` attribute.
-        
+
         Parameters
         ----------
         formal_advisory : bool, optional
@@ -232,6 +232,7 @@ class BDeckFile:
         lines = self.file.readlines()
         count = len(lines)
         i = 0
+        last_timestr = ''
         while i < count:
             line = lines[i]
             linesegs = line.split(',')
@@ -249,6 +250,10 @@ class BDeckFile:
             self.idata['basin'] = linesegs[0]
             self.idata['number'] = _safe_int(linesegs[1])
             timestr = linesegs[2].strip()
+            if not _long_format and last_timestr == timestr:
+                # Duplicated time, which sholdn't be happending
+                i += 1
+                continue
             self.idata['timestr'] = timestr
             self.idata['time'] = datetime.datetime.strptime(timestr, '%Y%m%d%H')
             self.idata['technum'] = linesegs[3].strip()
@@ -303,6 +308,7 @@ class BDeckFile:
                     self.idata['r64'] = tuple(map(int, linesegs[13:17]))
             self._record_all()
             self._record_meta()
+            last_timestr = timestr
             i += 1
             #print(line)
         self._fullyread = True
